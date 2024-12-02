@@ -1,0 +1,100 @@
+#!/bin/bash
+
+function usage()
+{
+    echo Usage: $0 '[--namespace NS/-n NS] [-o CMD|--open=CMD] [service]'
+    exit $1
+}
+
+namespace_opt=''
+open=''
+service=''
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n*|--namespace*)
+            if [[ $1 =~ = ]]; then
+                namespace_opt="-n ${1##*=}"
+            else
+                shift
+                namespace_opt="-n $1"
+            fi
+            [ -n "$namespace_opt" ] || usage 1
+        ;;
+        -o|--open)
+          if open=$(which xdg-open 2>/dev/null); then
+            :
+          elif open=$(which open 2>/dev/null); then
+            :
+          else
+            open=echo
+          fi
+        ;;
+        -h|--help)
+            usage
+        ;;
+        -*)
+            usage 1
+        ;;
+        *)
+            service="$1"
+    esac
+    shift
+done
+
+svc_ports_command="jq -r '.items[] |
+  {
+    name: .metadata.name,
+    port: .spec.ports[].port | tonumber,
+    lport: (\"\\(.metadata.name)\") | explode | add
+  } |
+  \"\\(.name):\\(.port):\\(if .lport < 1024 then .lport + 1024 else .lport end)\"
+'"
+
+svcs=$(
+    FZF_DEFAULT_COMMAND="command kubectl get svc -o json $namespace_opt | $svc_ports_command" \
+        fzf -m --ansi --no-preview -1 --exact --select-1 --query="$@"
+)
+
+if [ -z "$svcs" ]; then
+    echo 'No valid service found'
+    exit 0
+fi
+
+function wait_ports()
+{
+  local try=10
+  for port; do
+    while ! nc -z 127.0.0.1 $port && [ $try -gt 0 ]; do
+      sleep 1
+      let try=try-1
+    done
+  done
+}
+
+pids=()
+lports=()
+for svc in $svcs; do
+    name=$(cut -d: -f1 <<<$svc)
+    port=$(cut -d: -f2 <<<$svc)
+    lport=$(cut -d: -f3 <<<$svc)
+    cmd="kubectl port-forward $namespace_opt svc/$name $lport:$port"
+    echo "+ $cmd"
+    command $cmd & pids+=($!)
+    lports+=($lport)
+
+done
+
+if [ -n "$open" ]; then
+  echo Waiting port to open: ${lports[*]}
+  wait_ports ${lports[*]}
+
+  for port in ${lports[*]}; do
+    echo "Opening http://127.0.0.1:$lport"
+    $open http://127.0.0.1:$lport
+  done
+fi
+
+trap "echo -e '\nKilling pids: ${pids[*]}'; kill -INT ${pids[*]}" SIGINT SIGTERM SIGHUP EXIT
+wait
+sleep 2 # give a chance to prompt appear

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+kubectl api-resources --verbs=list -o name --namespaced=false | while read kind; do
+  echo -n "$kind: "
+  kubectl get --ignore-not-found -A $kind | wc -l
+done 2>/dev/null
+
+kubectl api-resources --verbs=list -o name --namespaced=true | while read kind; do
+  echo -n "$kind: "
+  kubectl get --ignore-not-found -A $kind | wc -l
+done 2>/dev/null

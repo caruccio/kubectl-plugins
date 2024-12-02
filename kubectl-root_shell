@@ -1,0 +1,103 @@
+#!/bin/bash
+
+usage()
+{
+    echo "Usage: kubectl root-shell [OPTIONS...] [NAME]"
+    echo
+    echo "Options:"
+    echo "  -n,--namespace NAMESPACE"
+    echo "     If present, the namespace scope for this CLI request."
+    echo
+    echo "  -u"
+    echo "     Create unprivileged pods. In this case, default NAME is user-shell."
+    echo
+    echo "  --dry-run"
+    echo "     Do not create the object, only print it on stdout."
+    echo
+    echo "  NAME"
+    echo "     Name for the Daemonset object."
+    echo "     Default: root-shell"
+    exit
+}
+
+DRY_RUN=false
+PRIVILEGED=true
+NAME=root-shell
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--namespace) NAMESPACE_ARG="-n $2" && shift ;;
+    -u) PRIVILEGED=false ;;
+    --dry-run) DRY_RUN=true ;;
+    -h|--help) usage ;;
+    *) NAME="$1"
+  esac
+  shift
+done
+
+$PRIVILEGED || NAME=user-shell
+
+tmp=$(mktemp -d)/$NAME.yaml
+trap "rm -rf $tmp" EXIT
+
+cat >$tmp <<EOF
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: $NAME
+spec:
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: $NAME
+      name: $NAME
+  template:
+    metadata:
+      labels:
+        app: $NAME
+        name: $NAME
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+      - command:
+        - /bin/cat
+        image: alpine:latest
+        imagePullPolicy: IfNotPresent
+        name: $NAME
+        tty: true
+        stdin: true
+EOF
+
+if $PRIVILEGED; then
+cat >>$tmp <<EOF
+        volumeMounts:
+        - mountPath: /host
+          name: host
+        #securityContext:
+        #  privileged: true
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      #serviceAccountName: $NAME
+      hostNetwork: true
+      volumes:
+      - hostPath:
+          path: /
+        name: host
+EOF
+fi
+
+cat >>$tmp <<EOF
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+EOF
+
+if $DRY_RUN; then
+  cat $tmp
+  exit
+fi
+
+kubectl create ${NAMESPACE_ARG} -f $tmp

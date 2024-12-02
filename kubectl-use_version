@@ -1,0 +1,111 @@
+#!/bin/bash
+
+function download()
+{
+  local dir=""
+
+  if [ -n "$1" ]; then
+    local dir="${1%/}/"
+  fi
+
+  KUBECTL_VERSIONS=(
+    $(curl -s "https://api.github.com/repos/kubernetes/kubernetes/releases?per_page=200" \
+      | jq -r '.[] | .tag_name' \
+      | grep '^v[0-9]\.[0-9][0-9]\?\.[0-9][0-9]\?$' \
+      | sort -Vr \
+      | awk -F . '!a[$1 FS $2]++' \
+      | sort -V)
+  )
+
+  echo "# Found ${#KUBECTL_VERSIONS[*]} kubectl versions: ${KUBECTL_VERSIONS[*]}"
+
+  for version in ${KUBECTL_VERSIONS[@]}; do
+    path="${dir}kubectl_${version}"
+    curl_cmd="curl -skL https://dl.k8s.io/release/${version}/bin/linux/amd64/kubectl -o kubectl_${version} && chmod +x kubectl_${version}"
+
+    if $opt_print; then
+      echo "$curl_cmd"
+      continue
+    fi
+
+    if [ -e "$path" ]; then
+      echo Already exists: $path
+    else
+      echo Downloading $path
+      $curl_cmd > $path
+    fi
+    chmod +x "$path"
+  done
+}
+
+function usage()
+{
+  echo 'Usage: kubectl use-version [--download] [--print] [DIR]'
+  echo
+  echo 'This command creates a symlink `kubectl` -> `kubectl_v[VERSION]` for the selected version available in your system.'
+  echo
+  echo '$ mkdir ~/bin'
+  echo '$ cd ~/bin'
+  echo '$ kubectl use-version --download'
+  echo '$ export PATH="$PATH:~/bin"'
+  echo '$ kubectl use-version'
+  echo
+  echo 'Download latest kubectl versions using the flag `--download`'
+  echo 'Use the flag --print to only print download URLs. Implies --download.'
+
+  exit ${1:-0}
+}
+
+opt_download=false
+opt_print=false
+DIR=""
+
+while [ $# -gt  0 ]; do
+  case $1 in
+    -h|--help) usage ;;
+    -d|--download) opt_download=true ;;
+    -p|--print) opt_print=true ; opt_download=true;;
+    *) DIR="$1"
+  esac
+  shift
+done
+
+if $opt_download; then
+  download "$DIR"
+  #exit
+fi
+
+if [ -n "$DIR" ] && [ -d "$DIR" ]; then
+  KUBECTL_BIN="$DIR/kubectl"
+else
+  if ! KUBECTL_BIN=$(type -P kubectl); then
+    echo kubectl not found in PATH. Assuming $PWD/kubectl
+    KUBECTL_BIN=$PWD/kubectl
+  fi
+fi
+
+if [ -e "$KUBECTL_BIR" ]; then
+  if ! [ -L "$KUBECTL_BIN" ]; then
+    echo kubectl is not a symlink
+    exit 1
+  fi
+fi
+
+KUBECTL_DIR=${KUBECTL_BIN%/*}
+
+shopt -s nullglob
+KUBECTL_VERSIONS=(
+  ${KUBECTL_DIR}/kubectl_v*
+)
+shopt -u nullglob
+
+if [ ${#KUBECTL_VERSIONS[*]} -eq 0 ]; then
+  echo "No kubectl binaries found in $KUBECTL_DIR: expected filename format is 'kubectl_v[VERSION]'"
+  exit 1
+fi
+
+KUBECTL_TARGET=$(printf "%s\n" ${KUBECTL_VERSIONS[*]} | sort -n -r | fzf -1 --ansi --no-preview --cycle)
+
+if [ -f "$KUBECTL_TARGET" ]; then
+  ln -vfs "$KUBECTL_TARGET" "$KUBECTL_BIN"
+fi

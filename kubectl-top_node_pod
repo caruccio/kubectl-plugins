@@ -1,0 +1,50 @@
+#!/bin/bash
+
+function usage()
+{
+    echo Usage: $0 '[--cpu/-c|--memory/-m]' nodes...
+    echo Sort by memory is the default
+    exit ${1:-0}
+}
+
+node_names=()
+sort_field=memory
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -c|--cpu)
+            sort_field=cpu
+        ;;
+        -m|--memory)
+            sort_field=memory
+        ;;
+        -h|--help)
+            usage
+        ;;
+        *)
+            node_names+=($1)
+    esac
+    shift
+done
+
+if [ "${#node_names[*]}" -lt 1 ]; then
+    usage 1
+fi
+
+
+_IFS="$IFS" IFS='|'
+kubectl top node --sort-by=$sort_field | grep -E "^(NAME|${node_names[*]})"
+IFS="$_IFS"
+
+for node_name in ${node_names[@]}; do
+    echo
+    t="Topping node $node_name"
+    echo "$t"
+    printf "%-${#t}s\n" = | tr ' ' =
+
+
+    tpl='{{range $index, $pod := .items}}{{ if $index }}|{{else}}^({{end}}{{$pod.metadata.namespace}}\s+{{$pod.metadata.name}}\s{{end}}|NAME|[^a-zA-Z]).*'
+    regex=$(kubectl get pod --field-selector=spec.nodeName=$node_name -A -o template --template="$tpl") || exit 1
+
+    kubectl top pod --all-namespaces --sort-by=$sort_field $@ | grep --color=no -E "$regex"
+done

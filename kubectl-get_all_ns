@@ -1,0 +1,6 @@
+#!/bin/bash
+
+ns="${1:+-n $1}"
+shift
+
+kubectl api-resources --verbs=list --namespaced -o name  "$@" | xargs -n 1 kubectl get --show-kind --ignore-not-found $ns

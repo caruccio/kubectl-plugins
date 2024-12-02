@@ -1,0 +1,82 @@
+#!/bin/bash
+
+function usage()
+{
+    echo Usage: $0 '[--namespace NS/-n NS] [--all/-a|POD...]'
+    exit $1
+}
+
+all_pods=false
+pod_names=()
+label_selector=''
+namespace=''
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -a|--all)
+            all_pods=true
+        ;;
+        -l|--labels)
+            if [[ $1 =~ = ]]; then
+                label_selector=${1##*=}
+            else
+                shift
+                label_selector="$1"
+            fi
+            [ -n "$label_selector" ] || usage 1
+        ;;
+        -n|--namespace)
+            if [[ $1 =~ = ]]; then
+                namespace=${1##*=}
+            else
+                shift
+                namespace="$1"
+            fi
+            [ -n "$namespace" ] || usage 1
+        ;;
+        -h|--help)
+            usage
+        ;;
+        -*)
+            usage 1
+        ;;
+        *)
+            pod_names+=($1)
+    esac
+    shift
+done
+
+if [ "${#pod_names[*]}" -lt 1 ] && ! $all_pods; then
+    usage 1
+fi
+
+if [ -z "$namespace" ]; then
+    config="$(kubectl config view -o json)"
+    context="$(kubectl config current-context)"
+    namespace="$(jq -r  ".contexts[]|select(.name==\"$context\").context.namespace // empty" <<<$config)"
+    if [ -z "$namespace" ]; then
+        namespace=default
+    fi
+fi
+
+if $all_pods; then
+    pod_names=(
+        $(kubectl get pod -o name ${namespace:+-n $namespace} ${label_selector:+-l $label_selector} | cut -f2 -d/)
+    )
+fi
+
+echo "Evicting pods"
+for pod_name in ${pod_names[@]}; do
+    echo -n "$pod_name: "
+
+    res=$(
+        kubectl create -f - --raw /api/v1/namespaces/$namespace/pods/$pod_name/eviction \
+            <<<"{\"apiVersion\":\"policy/v1\",\"kind\":\"Eviction\",\"metadata\":{\"name\":\"$pod_name\",\"namespace\":\"$namespace\"}}"
+    )
+
+    if jq .code <<<"$res" 2>/dev/null | grep -qw 201; then
+        echo evicted
+    else
+        jq .status <<<"$res" 2>/dev/null || true
+    fi
+done

@@ -1,0 +1,38 @@
+#!/bin/bash
+
+usage()
+{
+    echo "Usage: kubectl extract [-n namespace] secret [...secret]"
+    exit
+}
+
+while [ $# -gt 0 ]; do
+    while getopts n: opt; do
+        case $opt in
+            n) NAMESPACE=$OPTARG;;
+            h) usage
+        esac
+    done
+    [ $? -eq 0 ] || exit 1
+    [ $OPTIND -gt $# ] && break   # we reach end of parameters
+
+    shift $[$OPTIND - 1] # free processed options so far
+    OPTIND=1             # we must reset OPTIND
+    ARGS[${#ARGS[*]}]=$1 # save first non-option argument (a.k.a. positional argument)
+    shift                # remove saved arg
+done
+
+#echo Namespace: $NAMESPACE
+#echo Secrets: ${ARGS[*]}
+
+for secret in ${ARGS[*]}; do
+    data="$(kubectl get secret ${NAMESPACE:+ -n $NAMESPACE} $secret -o json)"
+    keys=( $(jq -r '.data | keys | .[]' <<<"$data") )
+    [ ${#keys[*]} -eq 0 ] && continue
+    for key in ${keys[*]}; do
+        echo "$key: "
+        value=$(jq -r ".data[\"$key\"]" <<<"$data" | base64 -d)
+        echo "$value"
+        [ "${value: -1}" == $'\n' ] || echo
+    done
+done

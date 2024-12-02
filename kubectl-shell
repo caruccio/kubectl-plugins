@@ -1,0 +1,24 @@
+#!/bin/bash
+
+node=$1
+shift
+
+if [ -z "$node" ]; then
+    echo "Usage: $0 NODE_NAME [command]"
+    exit 1
+fi
+
+pod=$(kubectl get pod -n kube-system -o json | jq '.items[]|select(.spec.nodeName=="'$node'")|.metadata.name' -r | grep root-shell | head -1)
+
+if [ -z "$pod" ]; then
+    echo root-shell pod not found in node $node
+    exit 1
+fi
+
+set -x
+
+if [ $# -gt 0 ]; then
+    kubectl exec -it -n kube-system $pod -- chroot /host /bin/bash -c "$*"
+else
+    kubectl exec -it -n kube-system $pod chroot /host
+fi

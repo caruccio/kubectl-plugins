@@ -1,0 +1,56 @@
+#!/bin/bash
+
+reset="$(tput sgr0)"
+bold="$(tput bold)"
+red="$(tput setaf 1)"
+green="$(tput setaf 2)"
+yellow="$(tput setaf 3)"
+gray="$(tput setaf 8)"
+magenta="$(tput setaf 13)"
+
+declare -A color_map=()
+
+color_map[ContainerCreating]="$magenta"
+color_map[Pending]="$yellow"
+color_map[Running]="$green"
+color_map[Error]="$red"
+color_map["[a-zA-Z0-9]\+BackOf[a-zA-Z0-9]\+"]="$red"
+color_map[Terminating]="$gray"
+color_map[Finished]="$gray"
+color_map[Completed]="$gray"
+color_map[NotReady]="$red"
+color_map[Ready]="$green"
+
+regex=""
+for word in ${!color_map[@]}; do
+  regex+="s/\b$word\b/${color_map[$word]}&$reset/g; t word; "
+done
+
+regex+='
+
+:word
+s|\b0/0\b|0/0|; t ok
+s|\b1/1\b|1/1|; t ok
+s|\b2/2\b|2/2|; t ok
+s|\b3/3\b|3/3|; t ok
+s|\b4/4\b|4/4|; t ok
+s|\b5/5\b|5/5|; t ok
+s|\b6/6\b|6/6|; t ok
+s|\b7/7\b|7/7|; t ok
+s|\b8/8\b|8/8|; t ok
+s|\b9/9\b|9/9|; t ok
+b color
+
+:ok
+s|\b[0-9]\+/[0-9]\+\b|'$green'&'$reset'|g
+b done
+
+:color
+s|\b0/[1-9]\+[0-9]*\b|'$red'&'$reset'|g; t done
+s|\b[1-9]\+/[0-9]\+\b|'$yellow'&'$reset'|g; t done
+
+:done
+'
+
+#exec sed --debug -e "$regex"
+kubectl $@ | sed -e "$regex"

@@ -1,0 +1,15 @@
+#!/bin/bash
+
+VERSIONS=$( \
+    curl -s https://api.github.com/repos/kubernetes/kubernetes/releases?per_page=100 \
+    | jq -r '.[] | .tag_name' \
+    | grep '^v[0-9]\.[0-9][0-9]\?\.[0-9][0-9]\?$' \
+    | sort -Vr \
+    | awk -F . '!a[$1 FS $2]++' \
+    | sort -V)
+
+for version in $VERSIONS; do \
+  echo Downloading kubectl-$version ...
+  curl -skL https://storage.googleapis.com/kubernetes-release/release/${version}/bin/linux/amd64/kubectl > ~/bin/kubectl_${version}
+done
+

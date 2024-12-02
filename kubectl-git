@@ -1,0 +1,83 @@
+#!/bin/bash
+
+REPO_DIR=''
+REMOTE_NAME='origin'
+REMOTE_URL=''
+PUSH=false
+BRANCH=''
+
+# $1: short[,long] option name
+# $2: output var name
+# $1+N: positional parameters
+function parse_parameter()
+{
+    if [[ "$1" =~ , ]]; then
+        local short=$1
+        local long=''
+    else
+        local short="${1%%,*}"
+        local long="${1#*,}"
+    fi
+
+    name=$2
+    value=''
+    shift 2
+
+    param="${1#$short}"
+    param="${param#$long}"
+
+    if [ "${param:0:1}" == = ]; then
+        value="${param:1}"
+        echo 1
+    elif [ -z "${param:0:1}" ]; then
+        if [ $# -lt 2 ]; then
+            echo Missing value: $param >&2
+            exit 1
+        fi
+        value="$2"
+        echo 2
+    fi
+
+    eval "$name=$value"
+}
+
+set -x
+while [ $# -gt 0 ]; do
+    n=1
+    case "${1}" in
+        -b*|--branch*)
+            n=$(parse_parameter -b,--branch BRANCH "$@")
+        ;;
+        -r*|--remote*)
+            n=$(parse_parameter -r,--remote REMOTE_NAME "$@")
+        ;;
+        -u*|--url*)
+            n=$(parse_parameter -u,--url REMOTE_URL "$@")
+        ;;
+        -p|--push)
+            PUSH=true
+        ;;
+        *) echo Invalid parameter: $1
+    esac
+    shift $n
+done
+
+if [ -z "$REPO_DIR" ]; then
+    REPO_DIR="$PWD"
+fi
+
+cd "$REPO_DIR"
+
+if $PUSH && [ -z "$BRANCH" ]; then
+    BRANCH=$(git branch --no-color --show-current)
+fi
+
+if [ -n "$BRANCH" ]; then
+    git switch "$BRANCH"
+fi
+
+echo REPO_DIR=$REPO_DIR
+echo REMOTE_NAME=$REMOTE_NAME
+echo REMOTE_URL=$REMOTE_URL
+echo PUSH=$PUSH
+echo BRANCH=$BRANCH
