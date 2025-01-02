@@ -5,14 +5,24 @@ usage()
     echo "Usage: kubectl root-shell [OPTIONS...] [NAME]"
     echo
     echo "Options:"
+    echo "  --dry-run"
+    echo "     Do not create the object, only print it on stdout."
+    echo
     echo "  -n,--namespace NAMESPACE"
     echo "     If present, the namespace scope for this CLI request."
     echo
+    echo "  --okd|--openshift"
+    echo "     Create provileged SCC and use it ."
+    echo
+    echo "  --service-account"
+    echo "     ServiceAccount name. Default=default."
+    echo
+    echo "  --inject-ssh-key SSH_PUBKEY_BASE64"
+    echo "     WARNING: THIS IS UNSAFE"
+    echo "     Inject SSH public key into node and reloads sshd service."
+    echo
     echo "  -u"
     echo "     Create unprivileged pods. In this case, default NAME is user-shell."
-    echo
-    echo "  --dry-run"
-    echo "     Do not create the object, only print it on stdout."
     echo
     echo "  NAME"
     echo "     Name for the Daemonset object."
@@ -20,16 +30,38 @@ usage()
     exit
 }
 
+SLEEP_COMMAND="
+- sleep
+- inf
+"
+
+SSH_KEY_COMMAND="
+- /bin/sh
+- -c
+- |
+  set -x
+  grep '\${SSH_PUBKEY}' /root/.ssh/authorized_keys || echo '\${SSH_PUBKEY}' >> /host/root/.ssh/authorized_keys
+  grep '^AllowAgentForwarding yes' /host/etc/ssh/sshd_config || echo 'AllowAgentForwarding yes' >> /host/etc/ssh/sshd_config
+  grep '^PubkeyAuthentication yes' /host/etc/ssh/sshd_config || echo 'PubkeyAuthentication yes' >> /host/etc/ssh/sshd_config
+  chroot /host systemctl reload sshd
+  sleep inf
+"
+
+NAMESPACE=kube-system
 DRY_RUN=false
 PRIVILEGED=true
 NAME=root-shell
+SERVICE_ACCOUNT=default
+OKD=true
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -n|--namespace) NAMESPACE_ARG="-n $2" && shift ;;
+    -n|--namespace) shift && NAMESPACE="$1" ;;
     -u) PRIVILEGED=false ;;
     --dry-run) DRY_RUN=true ;;
     -h|--help) usage ;;
+    --okd|--openshift) OKD=true ;;
+    --service-account) SERVICE_ACCOUNT="$1" ;;
     *) NAME="$1"
   esac
   shift
@@ -40,11 +72,50 @@ $PRIVILEGED || NAME=user-shell
 tmp=$(mktemp -d)/$NAME.yaml
 trap "rm -rf $tmp" EXIT
 
-cat >$tmp <<EOF
+> $tmp
+
+if $OKD; then
+  cat >>$TMP <<EOF
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: privileged-root-shell
+allowHostDirVolumePlugin: true
+allowHostIPC: true
+allowHostNetwork: true
+allowHostPID: true
+allowHostPorts: true
+allowPrivilegedContainer: true
+allowedCapabilities:
+- '*'
+defaultAddCapabilities: null
+fsGroup:
+  type: RunAsAny
+groups: null
+priority: null
+readOnlyRootFilesystem: false
+requiredDropCapabilities: null
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+seccompProfiles:
+- '*'
+supplementalGroups:
+  type: RunAsAny
+users:
+- system:serviceaccount:$NAMESPACE:$SERVICE_ACCOUNT
+volumes:
+- '*'
+EOF
+fi
+
+cat >>$tmp <<EOF
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: $NAME
+  namespace: $NAMESPACE
 spec:
   revisionHistoryLimit: 0
   selector:
@@ -78,7 +149,7 @@ cat >>$tmp <<EOF
       hostNetwork: true
       hostPID: true
       hostIPC: true
-      #serviceAccountName: $NAME
+      serviceAccountName: $SERVICE_ACCOUNT
       hostNetwork: true
       volumes:
       - hostPath:
@@ -100,4 +171,4 @@ if $DRY_RUN; then
   exit
 fi
 
-kubectl create ${NAMESPACE_ARG} -f $tmp
+kubectl create -n ${NAMESPACE} -f $tmp
