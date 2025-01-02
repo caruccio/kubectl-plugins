@@ -1,0 +1,470 @@
+#!/bin/bash
+
+RED='\033[1;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RESET='\033[0m'
+
+NAMESPACE=''
+NAMESPACE_OPT=''
+DAEMONSET=''
+PODS=''
+MAIN_POD=''
+REDIR='&>/dev/null'
+VERBOSE=false
+KEEP_RESOURCES=false
+DELETE_RESOURCES=false
+CHECK_COUNTER=0
+RESOURCE_NAME=net-check
+
+declare -a SERVICES=()
+declare -a KUBECTL_COMMANDS=()
+declare -a CUSTOM_COMMANDS=()
+
+declare -A TESTS
+TESTS["check_internal_dns"]="Checking internal DNS resolution"
+TESTS["check_external_dns"]="Checking external DNS resolution"
+TESTS["check_api_server"]="Checking connection to API server (%s)"
+TESTS["check_service"]="Checking connection to service (%s)"
+TESTS["check_internal_service"]="Checking connection to internal service (%s)"
+TESTS["check_external_connection"]="Checking connection to %s"
+TESTS["check_daemonset_pods_connection"]="Checking connection across pods from DaemonSet"
+TESTS["execute_kubectl_command"]="Executing kubectl command (kubectl %s)"
+TESTS["execute_custom_command"]="Checking user-defined command (%s)"
+
+declare -a CHECK_FUNCTIONS=(
+  check_internal_dns
+  check_external_dns
+  check_api_server
+  check_service
+  check_internal_service
+  check_external_connection
+  check_daemonset_pods_connection
+  execute_custom_command
+  execute_kubectl_command
+)
+
+show_help()
+{
+  echo "Use: kubectl netcheck [OPTIONS]"
+  echo
+  echo Executes the following checks inside the cluster:
+  echo
+  for i in "${!CHECK_FUNCTIONS[@]}"; do
+    local t="${CHECK_FUNCTIONS[$i]//_/ }"
+    echo "  $((i + 1)). ${t^}"
+  done
+  echo
+  echo "Option:"
+  echo "  -c, --cmd COMMAND                Execute specified \`COMMAND\`. Can be used multiple times."
+  echo "  --delete-resources               Delete resources only. Use it to force cleanup after running with --keep-resources."
+  echo "  -h, --help                       Show this help message"
+  echo "  -k, --kubectl ARGS               Execute specified \`kubectl ARGS\`. Can be used multiple times."
+  echo "  --keep-resources                 Don't remove created resources at the end and ignore already existing resources when starting."
+  echo "  -n, --namespace NAME             Use namespace NAME to create resources."
+  echo "  -r, --resource-name NAME         Use NAME for created resources. Default is $RESOURCE_NAME."
+  echo "  -s, --service NAME[:PORT]        Check HTTP conection to NAME[:PORT]. Can be used multiple times."
+  echo "  -v, --verbose                    Show commands being executed."
+  echo
+  echo "Example usage:"
+  echo
+  echo " \$ kubectl netcheck --service web.default.svc:8080 --service web.default.svc8080 --cmd 'ping -W 3 -c 3 example.com' --kubectl 'get pods -n default -l app=web'"
+}
+
+# Processamento de argumentos
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      show_help
+      exit 0
+    ;;
+    -r|--resource-name)
+      RESOURCE_NAME="$1"
+    ;;
+    -s|--service)
+      shift
+      SERVICES+=( "$1" )
+    ;;
+    -c|--cmd)
+      shift
+      CUSTOM_COMMANDS+=( "$1" )
+    ;;
+    --delete-resources)
+      DELETE_RESOURCES=true
+    ;;
+    -k|--kubectl)
+      shift
+      KUBECTL_COMMAND+=( "$1" )
+    ;;
+    -n|--namespace)
+      NAMESPACE="$1"
+      NAMESPACE_OPT="-n $1"
+    ;;
+    -v|--verbose)
+      REDIR=''
+      VERBOSE=true
+    ;;
+    --keep-resources)
+      KEEP_RESOURCES=true
+    ;;
+    *)
+      echo "Invalid option: $1"
+      show_help
+      exit 1
+    ;;
+  esac
+  shift
+done
+
+printc()
+{
+  local color="$1"
+  shift
+  printf "$color"
+  printf "$@"
+  printf "$RESET"
+}
+
+printc_n()
+{
+  local color="$1"
+  shift
+  printf "$color"
+  printf "$@\n"
+  printf "$RESET"
+}
+
+print_title_n()
+{
+  local caller_func=${FUNCNAME[1]} # caller name
+  local mesg="${TESTS[$caller_func]}"
+
+  let CHECK_COUNTER+=1
+  printf "${YELLOW}${CHECK_COUNTER}. $mesg${RESET}\n" "$@"
+}
+
+print_title()
+{
+  local caller_func=${FUNCNAME[1]} # caller name
+  local mesg="${TESTS[$caller_func]}"
+
+  let CHECK_COUNTER+=1
+  printf "${YELLOW}${CHECK_COUNTER}. $mesg: ${RESET}" "$@"
+}
+
+print_result_ok_n()
+{
+  printf "${GREEN}OK${@:+: $@}${RESET}\n"
+}
+
+print_result_failed_n()
+{
+  printf "${RED}FAILED${@:+: $@}${RESET}\n"
+}
+
+execute()
+{
+  if $VERBOSE; then
+    echo "++> $@"
+  fi
+
+  eval "$@" "$REDIR"
+}
+
+read_resources()
+{
+  DAEMONSET=$(kubectl get ds/$RESOURCE_NAME -o json $NAMESPACE_OPT)
+  PODS=$(kubectl get pods -l app=$RESOURCE_NAME -o json $NAMESPACE_OPT | jq -r .items)
+  SERVICE=$(kubectl get svc/$RESOURCE_NAME -o json $NAMESPACE_OPT)
+}
+
+get_pod_attr_by_index()
+{
+  local i="$1"
+  local attr="$2"
+
+  jq -r ".[$i]${attr}" <<<$PODS
+}
+
+get_pod_name_by_index()
+{
+  get_pod_attr_by_index $1 .metadata.name
+}
+
+get_pod_node_name_by_index()
+{
+  get_pod_attr_by_index $1 .spec.nodeName
+}
+
+get_service_ip()
+{
+  local name=$1
+  local ns=$2
+  local svc=$(kubectl get svc -o json ${ns:+-n $ns} $name)
+
+  jq ".spec.clusterIP // empty" <<<$svc
+}
+
+get_service_port()
+{
+  local i=$1
+  local name=$2
+  local ns=$3
+  local svc=$(kubectl get svc -o json ${ns:+-n $ns} $name)
+
+  jq ".spec.ports[$i].port // empty" <<<$svc
+}
+
+# Função para criar o DaemonSet e o Serviço dedicado
+create_daemonset_and_service()
+{
+  if execute "kubectl get ds $RESOURCE_NAME $NAMESPACE_OPT"; then
+    if $KEEP_RESOURCES; then
+      printc_n $GREEN "Using existing DaemonSet"
+      return
+    fi
+    printc $RED "DaemonSet $RESOURCE_NAME already exists. Recreate it? [y/N] "
+    read q
+    case "$q" in
+      y|Y|[yY]es) : ;;
+      *)
+        printc_n $GREEN "Using existing DaemonSet"
+        return
+    esac
+
+    execute "kubectl delete ds/$RESOURCE_NAME svc/$RESOURCE_NAME $NAMESPACE_OPT"
+
+    while kubectl get ds/$RESOURCE_NAME $NAMESPACE_OPT &>/dev/null; do
+      sleep 2
+    done
+  fi
+
+  printc_n $YELLOW "Creating DaemonSet/$RESOURCE_NAME and Service/$RESOURCE_NAME..."
+
+  cat <<EOF | kubectl apply $NAMESPACE_OPT -f -
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: $RESOURCE_NAME
+  labels:
+    app: $RESOURCE_NAME
+spec:
+  selector:
+    matchLabels:
+      app: $RESOURCE_NAME
+  template:
+    metadata:
+      labels:
+        app: $RESOURCE_NAME
+    spec:
+      terminationGracePeriodSeconds: 1
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: $RESOURCE_NAME
+        image: wbitt/network-multitool
+        env:
+        - name: HTTP_PORT
+          value: "8080"
+        - name: HTTPS_PORT
+          value: "8443"
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: https
+          containerPort: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: $RESOURCE_NAME
+spec:
+  selector:
+    app: $RESOURCE_NAME
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  - name: https
+    port: 8443
+    targetPort: https
+EOF
+    trap cleanup_resources EXIT
+}
+
+# Função para executar comandos no DaemonSet
+run_in_daemonset()
+{
+  local i="$1"
+  local cmd="$2"
+  local pod_name=$(get_pod_name_by_index $i)
+
+  execute "kubectl exec $NAMESPACE_OPT --quiet $pod_name -- /bin/bash -c '$cmd'"
+}
+
+# Funções de teste
+check_internal_dns()
+{
+  print_title
+  run_in_daemonset 0 "nslookup kubernetes.default.svc" && print_result_ok_n || print_result_failed_n
+}
+
+check_external_dns()
+{
+  print_title
+  run_in_daemonset 0 "nslookup google.com" && print_result_ok_n || print_result_failed_n
+}
+
+check_external_connection()
+{
+  print_title http://google.com
+  run_in_daemonset 0 "timeout 5 curl -s http://google.com" && print_result_ok_n || print_result_failed_n
+}
+
+check_api_server()
+{
+  print_title kubernetes.default.svc
+  run_in_daemonset 0 "timeout 5 curl -sk https://kubernetes.default.svc.cluster.local" && print_result_ok_n || print_result_failed_n
+}
+
+check_service()
+{
+  local name=$RESOURCE_NAME${NAMESPACE:+.$NAMESPACE.svc}
+  print_title $name
+
+  local service_ip=$(get_service_ip $RESOURCE_NAME $NAMESPACE)
+
+  if [ -z "$service_ip" ]; then
+    print_result_failed_n "Unable to retrieve ip address from service $name"
+    return 1
+  fi
+
+  local cmd="timeout 5 nc -zv $service_ip 8080"
+  run_in_daemonset 0 "$cmd" && print_result_ok_n || print_result_failed_n
+}
+
+execute_kubectl_command()
+{
+  for args in "${KUBECTL_COMMANDS[@]}"; do
+    local cmd="kubectl $args"
+    print_title "$cmd"
+    execute "$cmd" && print_result_ok_n || print_result_failed_n
+  done
+}
+
+execute_custom_command()
+{
+  for cmd in "${CUSTOM_COMMANDS[@]}"; do
+    print_title "$cmd"
+    execute "$cmd" && print_result_ok_n || print_result_failed_n
+  done
+}
+
+check_internal_service()
+{
+    local host port name ns svc domain
+    for svc in "${SERVICES[@]}"; do
+        print_title $svc
+        IFS=: read host port <<<$svc
+        IFS=. read name ns svc domain <<<$host
+
+        if [ -z "$port" ]; then
+          port=$(get_service_port 0 $name $ns)
+        fi
+        local cmd="timeout 5 nc -zv $host $port"
+        run_in_daemonset 0 "$cmd" && print_result_ok_n "$cmd" || print_result_failed_n "$cmd"
+    done
+}
+
+check_daemonset_pods_connection()
+{
+  local node_pod_ip=( $(jq -r '.[] | [ .spec.nodeName, .metadata.name, .status.podIP ] | join(":")' <<<$PODS) )
+  local i=0
+
+  print_title_n
+
+  for npi in ${node_pod_ip[@]}; do
+    npi=( ${npi//:/ } )
+    local node=${npi[0]}
+    local pod=${npi[1]}
+    local ip=${npi[2]}
+    #echo
+    echo -n "$(get_pod_node_name_by_index $i)/$(get_pod_name_by_index $i) "
+    local cmd="
+      ok=true
+      for npi in ${node_pod_ip[@]}; do
+        npi=( \${npi//:/ } )
+        node=\${npi[0]}
+        pod=\${npi[1]}
+        ip=\${npi[2]}
+        start=\$(date +%s)
+        curl --connect-timeout 5 -s http://\$ip:8080 -o /dev/null &>/dev/null
+        ret=\$?
+        elapsed=\$(( \$(date +%s) - \$start))
+        [ \$elapsed -gt 0 ] && elapsedColor=\"$YELLOW\" || elapsedColor=\"$RESET\"
+        if [ \$ret -eq 0 ]; then
+          : # status=\"${GREEN}OK${RESET}\"
+        else
+          ok=false
+          status=\"${RED}FAILED${RESET}\"
+          echo -ne \"\\n- \$node/\$pod \${status} \${elapsedColor}(\${elapsed}s)$RESET\"
+        fi
+      done
+      \$ok && echo -e \"${GREEN}OK${RESET}\" || echo
+    "
+    REDIR='' run_in_daemonset $i "$cmd"
+    let i+=1
+  done
+}
+
+cleanup_resources()
+{
+  if $KEEP_RESOURCES; then
+    echo
+    printc_n "$YELLOW" "Will keep running created resources. Use \`--delete-resources\` to cleanup."
+    return 0
+  fi
+  echo ## for CTRL+C
+
+  delete_resources
+}
+
+delete_resources()
+{
+  printc_n $YELLOW "Deleting resources."
+  kubectl delete svc/$RESOURCE_NAME ds/$RESOURCE_NAME $NAMESPACE_OPT &> /dev/null
+  printc_n $YELLOW "Waiting up to 60s until all pods are gone..."
+  kubectl wait --for=delete pod -l app=$RESOURCE_NAME --timeout=60s &>/dev/null
+  printc_n $GREEN "All resources deleted. Bye."
+}
+
+main()
+{
+  if $DELETE_RESOURCES; then
+    delete_resources
+    exit
+  fi
+  printc_n $YELLOW "Starting network diagnostics - $(date --utc)"
+
+  create_daemonset_and_service
+
+  # Espera o DaemonSet estar pronto
+  printc_n $YELLOW "Waiting for all pods from DaemonSet to be ready..."
+  local desired=$(kubectl get ds/$RESOURCE_NAME -o json | jq -r .status.desiredNumberScheduled)
+  #kubectl wait --for=condition=Ready pod -l app=$RESOURCE_NAME
+  while [ ${ready:-0} -lt ${desired} ]; do
+    local ready=$(kubectl get ds/$RESOURCE_NAME -o json | jq -r .status.numberReady)
+    echo -ne "\r$ready/$desired pods ready..."
+    sleep 1
+  done
+  echo
+
+  read_resources
+  for check_func in "${CHECK_FUNCTIONS[@]}"; do
+    $check_func
+  done
+}
+
+# Executar função principal
+main

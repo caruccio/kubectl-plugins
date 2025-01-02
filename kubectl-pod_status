@@ -1,0 +1,135 @@
+#!/bin/bash
+
+BOLD='\033[1m'
+RED='\033[1;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RESET='\033[0m'
+
+usage()
+{
+    echo "Usage: kubectl pod-status [OPTIONS...] [POD_NAME,...]"
+    echo
+    echo "Options:"
+    echo "  -A, --all-namespaces"
+    echo "     Select pods from all namespaces."
+    echo
+    echo "  -n,--namespace NAMESPACE"
+    echo "     If present, the namespace scope for this CLI request."
+    echo
+    echo "  -l, --selector LABEL_SELECTOR,..."
+    echo "     Select pods by label."
+    echo
+    echo "  POD_NAME"
+    echo "     (Optional) Name of the pod(s)."
+
+    exit
+}
+
+NAMESPACE=''
+LABEL_SELECTOR=''
+ALL_NS=''
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -A|--all-namespaces) ALL_NS=-A ;;
+    -n|--namespace) shift; NAMESPACE="-n $1" ;;
+    -l|--selector) shift; LABEL_SELECTOR="-l $1" ;;
+    -h|--help) usage ;;
+    *) NAME+=" $1"
+  esac
+  shift
+done
+
+PODS=$(kubectl get pods $ALL_NS $NAMESPACE $LABEL_SELECTOR -o json)
+#echo $PODS|jq
+LEN=$(jq '.items|length' <<<$PODS)
+echo -e "${YELLOW}Total pods: $LEN${RESET}"
+
+# https://www.shellscript.sh/examples/hms/
+duration()
+{
+  # Convert Seconds to Hours, Minutes, Seconds
+  # Optional second argument of "long" makes it display
+  # the longer format, otherwise short format.
+  local SECONDS H M S MM D_TAG H_TAG M_TAG S_TAG
+  SECONDS=${1:-0}
+  let S=${SECONDS}%60
+  let MM=${SECONDS}/60 # Total number of minutes
+  let M=${MM}%60
+  let H=${MM}/60
+  let D=${H}/24
+  let H=${H}%24
+
+  if [ "$2" == "long" ]; then
+    # Display "1 hour, 2 minutes and 3 seconds" format
+    # Using the x_TAG variables makes this easier to translate; simply appending
+    # "s" to the word is not easy to translate into other languages.
+    [ "$D" -eq "1" ] && D_TAG="day" || D_TAG="days"
+    [ "$H" -eq "1" ] && H_TAG="hour" || H_TAG="hours"
+    [ "$M" -eq "1" ] && M_TAG="minute" || M_TAG="minutes"
+    [ "$S" -eq "1" ] && S_TAG="second" || S_TAG="seconds"
+    [ "$D" -gt "0" ] && printf "%d %s " $D "${D_TAG},"
+    [ "$H" -gt "0" ] && printf "%d %s " $H "${H_TAG},"
+    [ "$SECONDS" -ge "60" ] && printf "%d %s " $M "${M_TAG} and"
+    printf "%d %s\n" $S "${S_TAG}"
+  else
+    # Display "01h02m03s" format
+    [ "$D" -gt "0" ] && printf "%d%s" $D "d"
+    [ "$H" -gt "0" ] && printf "%d%s" $H "h"
+    [ "$M" -gt "0" ] && printf "%d%s" $M "m"
+    [ "$S" -gt "0" ] && printf "%d%s" $S "s"
+    printf "\n"
+  fi
+}
+
+function check_container()
+{
+  local pod="$1"
+  local i="$2"
+
+  local containerStatus=$(jq -r ".status.containerStatuses[$i]" <<<$pod)
+  local containerName=$(jq -r '.name' <<<$containerStatus)
+  local containerReady=$(jq -r '.ready // "false"' <<<$containerStatus)
+
+  if ! $containerReady; then
+    echo -en "  $containerName (ready=${RED}$containerReady${RESET}): ${RED}Not Ready${RESET}"
+  else
+    echo -en "  $containerName (ready=$containerReady): ${GREEN}OK${RESET}"
+  fi
+
+  local restartCount=$(jq -r ".restartCount // 0" <<<$containerStatus)
+  local stateRunning=$(jq -r '.state.running // empty' <<<$containerStatus)
+
+  if [ -n "$stateRunning" ]; then
+    local startedAt=$(jq -r '.startedAt' <<<$stateRunning)
+    local startedAtTimestamp=$(date -d "$startedAt" +%s --utc)
+    local nowTimestamp=$(date +%s --utc)
+  fi
+
+  if [ $restartCount -gt 0 ]; then
+    echo -en " restarts=${RED}$restartCount${RESET}"
+    echo -en " ${RED}WARN${RESET}"
+    local deltaTimestamp=$((nowTimestamp - startedAtTimestamp))
+    #if (( deltaTimestamp < (60*60) )); then
+    echo -en " ${YELLOW}Restarted=$startedAt${RESET} ($(duration $deltaTimestamp) ago)"
+    #fi
+  else
+    echo -en " restarts=$restartCount"
+    echo -en " ${GREEN}OK${RESET}"
+  fi
+
+  echo
+}
+
+for i in $(seq 0 $(($LEN - 1))); do
+  pod=$(jq -r ".items[$i]" <<<$PODS)
+  pod_name=$(jq -r ".metadata.name" <<<$pod)
+  node_name=$(jq -r ".spec.nodeName" <<<$pod)
+  echo -e "${BOLD}$node_name/$pod_name${RESET}"
+  for i in $(seq 0 $(jq '(.spec.containers|length) - 1' <<<$pod)); do
+    check_container "$pod" $i
+  done | tabulate -f plain
+  #break
+  echo
+done
