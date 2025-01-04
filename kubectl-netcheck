@@ -44,6 +44,8 @@ declare -a CHECK_FUNCTIONS=(
   execute_kubectl_command
 )
 
+declare -a CHECK_FUNCTIONS_ONLY=()
+
 show_help()
 {
   echo "Use: kubectl netcheck [OPTIONS]"
@@ -51,11 +53,12 @@ show_help()
   echo Executes the following checks inside the cluster:
   echo
   for i in "${!CHECK_FUNCTIONS[@]}"; do
-    local t="${CHECK_FUNCTIONS[$i]//_/ }"
-    echo "  $((i + 1)). ${t^}"
+    local func="${CHECK_FUNCTIONS[$i]}"
+    echo "  $((i + 1)). ${func}"
   done
   echo
   echo "Option:"
+  echo "  --check NAME                     Execute check NAME only. Can be used multiple times."
   echo "  -c, --cmd COMMAND                Execute specified \`COMMAND\`. Can be used multiple times."
   echo "  --delete-resources               Delete resources only. Use it to force cleanup after running with --keep-resources."
   echo "  -h, --help                       Show this help message"
@@ -80,6 +83,10 @@ while [[ $# -gt 0 ]]; do
     ;;
     -r|--resource-name)
       RESOURCE_NAME="$1"
+    ;;
+    --check)
+      shift
+      CHECK_FUNCTIONS_ONLY+=( "$1" )
     ;;
     -s|--service)
       shift
@@ -115,6 +122,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [ ${#CHECK_FUNCTIONS_ONLY[@]} -gt 0 ]; then
+  CHECK_FUNCTIONS=( ${CHECK_FUNCTIONS_ONLY[@]} )
+fi
 
 printc()
 {
@@ -165,7 +176,7 @@ print_result_failed_n()
 execute()
 {
   if $VERBOSE; then
-    echo "++> $@"
+    echo -e "\n++> $@"
   fi
 
   eval "$@" "$REDIR"
@@ -383,6 +394,7 @@ check_daemonset_pods_connection()
   local i=0
 
   print_title_n
+  local verbose_already_printed=false
 
   for npi in ${node_pod_ip[@]}; do
     npi=( ${npi//:/ } )
@@ -390,9 +402,11 @@ check_daemonset_pods_connection()
     local pod=${npi[1]}
     local ip=${npi[2]}
     #echo
-    echo -n "$(get_pod_node_name_by_index $i)/$(get_pod_name_by_index $i) "
     local cmd="
       ok=true
+      retMesg[7]=ConnectionRefused
+      retMesg[26]=ReadError
+      retMesg[28]=ConnectionTimeout
       for npi in ${node_pod_ip[@]}; do
         npi=( \${npi//:/ } )
         node=\${npi[0]}
@@ -400,20 +414,28 @@ check_daemonset_pods_connection()
         ip=\${npi[2]}
         start=\$(date +%s)
         curl --connect-timeout 5 -s http://\$ip:8080 -o /dev/null &>/dev/null
-        ret=\$?
+        retCode=\$?
         elapsed=\$(( \$(date +%s) - \$start))
         [ \$elapsed -gt 0 ] && elapsedColor=\"$YELLOW\" || elapsedColor=\"$RESET\"
-        if [ \$ret -eq 0 ]; then
+        if [ \$retCode -eq 0 ]; then
           : # status=\"${GREEN}OK${RESET}\"
         else
           ok=false
           status=\"${RED}FAILED${RESET}\"
-          echo -ne \"\\n- \$node/\$pod \${status} \${elapsedColor}(\${elapsed}s)$RESET\"
+          echo -ne \"\\n- \$node/\$pod \${status} \${elapsedColor}(\${elapsed}s, ret=\$retCode/\${retMesg[\$retCode]})$RESET\"
         fi
       done
       \$ok && echo -e \"${GREEN}OK${RESET}\" || echo
     "
-    REDIR='' run_in_daemonset $i "$cmd"
+
+    if $VERBOSE && ! $verbose_already_printed; then
+      verbose_already_printed=true
+      echo "--- Will executing command below inside each pod:"
+      echo -E "$cmd"
+      echo "---"
+    fi
+    echo -ne "$(get_pod_node_name_by_index $i)/$(get_pod_name_by_index $i) "
+    REDIR='' VERBOSE=false run_in_daemonset $i "$cmd"
     let i+=1
   done
 }
@@ -441,6 +463,23 @@ delete_resources()
 
 main()
 {
+  local KUBE_VERSION=$(kubectl version -o json)
+  local ret=$?
+
+  if [ $ret -ne 0 ]; then
+    printc_n $RED "Error contacting kubernetes"
+    exit 1
+  fi
+
+  local kubeGitVersion=$(jq -r '.serverVersion.gitVersion // empty' <<<$KUBE_VERSION)
+
+  if [ -z "$kubeGitVersion" ]; then
+    printc_n $RED "Error reading kubernetes version"
+    exit 1
+  fi
+
+  printc_n $YELLOW "Kubernetes ${kubeGitVersion}"
+
   if $DELETE_RESOURCES; then
     delete_resources
     exit
