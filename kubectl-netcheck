@@ -16,6 +16,7 @@ KEEP_RESOURCES=false
 DELETE_RESOURCES=false
 CHECK_COUNTER=0
 RESOURCE_NAME=net-check
+NO_WAIT_PODS=false
 
 declare -a SERVICES=()
 declare -a KUBECTL_COMMANDS=()
@@ -64,6 +65,7 @@ show_help()
   echo "  -h, --help                       Show this help message"
   echo "  -k, --kubectl ARGS               Execute specified \`kubectl ARGS\`. Can be used multiple times."
   echo "  --keep-resources                 Don't remove created resources at the end and ignore already existing resources when starting."
+  echo "  --no-wait-pods                   Don't wait for all pods from the DaemoSet to become Ready."
   echo "  -n, --namespace NAME             Use namespace NAME to create resources."
   echo "  -r, --resource-name NAME         Use NAME for created resources. Default is $RESOURCE_NAME."
   echo "  -s, --service NAME[:PORT]        Check HTTP conection to NAME[:PORT]. Can be used multiple times."
@@ -80,6 +82,9 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       show_help
       exit 0
+    ;;
+    --no-wait-pods)
+      NO_WAIT_PODS=true
     ;;
     -r|--resource-name)
       RESOURCE_NAME="$1"
@@ -396,37 +401,40 @@ check_daemonset_pods_connection()
   print_title_n
   local verbose_already_printed=false
 
+  #echo ${node_pod_ip[@]}
+
   for npi in ${node_pod_ip[@]}; do
     npi=( ${npi//:/ } )
     local node=${npi[0]}
     local pod=${npi[1]}
     local ip=${npi[2]}
-    #echo
-    local cmd="
+    #echo $node/$pod/$ip
+
+    local cmd='
       ok=true
       retMesg[7]=ConnectionRefused
       retMesg[26]=ReadError
       retMesg[28]=ConnectionTimeout
-      for npi in ${node_pod_ip[@]}; do
-        npi=( \${npi//:/ } )
-        node=\${npi[0]}
-        pod=\${npi[1]}
-        ip=\${npi[2]}
-        start=\$(date +%s)
-        curl --connect-timeout 5 -s http://\$ip:8080 -o /dev/null &>/dev/null
-        retCode=\$?
-        elapsed=\$(( \$(date +%s) - \$start))
-        [ \$elapsed -gt 0 ] && elapsedColor=\"$YELLOW\" || elapsedColor=\"$RESET\"
-        if [ \$retCode -eq 0 ]; then
-          : # status=\"${GREEN}OK${RESET}\"
+      for npi in '${node_pod_ip[@]}'; do
+        npi=( ${npi//:/ } )
+        node=${npi[0]}
+        pod=${npi[1]}
+        ip=${npi[2]}
+        start=$(date +%s)
+        curl --connect-timeout 5 -s http://$ip:8080 -o /dev/null &>/dev/null
+        retCode=$?
+        elapsed=$(( $(date +%s) - $start))
+        [ $elapsed -gt 0 ] && elapsedColor="'$YELLOW'" || elapsedColor="'$RESET'"
+        if [ $retCode -eq 0 ]; then
+          : # status="'${GREEN}OK${RESET}'"
         else
           ok=false
-          status=\"${RED}FAILED${RESET}\"
-          echo -ne \"\\n- \$node/\$pod \${status} \${elapsedColor}(\${elapsed}s, ret=\$retCode/\${retMesg[\$retCode]})$RESET\"
+          status="'${RED}FAILED${RESET}'"
+          echo -ne "\n- $node/$pod ${status} ${elapsedColor}(${elapsed}s, ret=$retCode/${retMesg[$retCode]})'$RESET'"
         fi
       done
-      \$ok && echo -e \"${GREEN}OK${RESET}\" || echo
-    "
+      $ok && echo -e "'${GREEN}OK${RESET}'" || echo
+    '
 
     if $VERBOSE && ! $verbose_already_printed; then
       verbose_already_printed=true
@@ -489,17 +497,20 @@ main()
   create_daemonset_and_service
 
   # Espera o DaemonSet estar pronto
-  printc_n $YELLOW "Waiting for all pods from DaemonSet to be ready..."
-  local desired=$(kubectl get ds/$RESOURCE_NAME -o json | jq -r .status.desiredNumberScheduled)
-  #kubectl wait --for=condition=Ready pod -l app=$RESOURCE_NAME
-  while [ ${ready:-0} -lt ${desired} ]; do
-    local ready=$(kubectl get ds/$RESOURCE_NAME -o json | jq -r .status.numberReady)
-    echo -ne "\r$ready/$desired pods ready..."
-    sleep 1
-  done
-  echo
+  if ! $NO_WAIT_PODS; then
+    printc_n $YELLOW "Waiting for all pods from DaemonSet to be ready..."
+    local desired=$(kubectl get ds/$RESOURCE_NAME -o json | jq -r .status.desiredNumberScheduled)
+    #kubectl wait --for=condition=Ready pod -l app=$RESOURCE_NAME
+    while [ ${ready:-0} -lt ${desired} ]; do
+      local ready=$(kubectl get ds/$RESOURCE_NAME -o json | jq -r .status.numberReady)
+      echo -ne "\r$ready/$desired pods ready..."
+      sleep 1
+    done
+    echo
+  fi
 
   read_resources
+
   for check_func in "${CHECK_FUNCTIONS[@]}"; do
     $check_func
   done
