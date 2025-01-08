@@ -3,6 +3,7 @@
 RED='\033[1;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BOLD='\033[1m'
 RESET='\033[0m'
 
 NAMESPACE=''
@@ -442,7 +443,7 @@ check_daemonset_pods_connection()
       echo -E "$cmd"
       echo "---"
     fi
-    echo -ne "$(get_pod_node_name_by_index $i)/$(get_pod_name_by_index $i) "
+    echo -ne "${BOLD}$(get_pod_node_name_by_index $i)/$(get_pod_name_by_index $i) ${RESET}"
     REDIR='' VERBOSE=false run_in_daemonset $i "$cmd"
     let i+=1
   done
