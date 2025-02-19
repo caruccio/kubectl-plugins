@@ -52,7 +52,7 @@ DRY_RUN=false
 PRIVILEGED=true
 NAME=root-shell
 SERVICE_ACCOUNT=default
-OKD=true
+OKD=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -75,7 +75,7 @@ trap "rm -rf $tmp" EXIT
 > $tmp
 
 if $OKD; then
-  cat >>$TMP <<EOF
+  cat >>$tmp <<EOF
 apiVersion: security.openshift.io/v1
 kind: SecurityContextConstraints
 metadata:

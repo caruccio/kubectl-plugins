@@ -32,18 +32,28 @@ ALL_NS=''
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -A|--all-namespaces) ALL_NS=-A ;;
-    -n|--namespace) shift; NAMESPACE="-n $1" ;;
-    -l|--selector) shift; LABEL_SELECTOR="-l $1" ;;
+    -A|--all-namespaces) ALL_NS=-A; NAMESPACE='';;
+    -n|--namespace) shift; NAMESPACE="-n $1"; ALL_NS='';;
+    -l|--selector) shift; LABEL_SELECTOR="-l $1" ; NAME='' ;;
     -h|--help) usage ;;
-    *) NAME+=" $1"
+    *) NAME+=" $1"; LABEL_SELECTOR=''
   esac
   shift
 done
 
-PODS=$(kubectl get pods $ALL_NS $NAMESPACE $LABEL_SELECTOR -o json)
+function jq_exists()
+{
+  jq -e 'if '$1' then true else false end'
+}
+
+
+PODS=$(kubectl get pods $ALL_NS $NAMESPACE $LABEL_SELECTOR $NAME -o json)
 #echo $PODS|jq
+if ! $(jq_exists .items <<<$PODS); then
+  PODS=$(jq -r '{items:[.]}' <<<$PODS)
+fi
 LEN=$(jq '.items|length' <<<$PODS)
+
 echo -e "${YELLOW}Total pods: $LEN${RESET}"
 
 # https://www.shellscript.sh/examples/hms/
@@ -88,24 +98,52 @@ function check_container()
   local pod="$1"
   local i="$2"
 
-  local containerStatus=$(jq -r ".status.containerStatuses[$i]" <<<$pod)
-  local containerName=$(jq -r '.name' <<<$containerStatus)
-  local containerReady=$(jq -r '.ready // "false"' <<<$containerStatus)
+  local containerStatuses=$(jq -r ".status.containerStatuses[$i]" <<<$pod)
+  local containerName=$(jq -r '.name' <<<$containerStatuses)
+  local containerReady=$(jq -r '.ready // false' <<<$containerStatuses)
 
-  if ! $containerReady; then
-    echo -en "  $containerName (ready=${RED}$containerReady${RESET}): ${RED}Not Ready${RESET}"
+  if $containerReady; then
+    echo -en "  $containerName (ready=$containerReady): "
   else
-    echo -en "  $containerName (ready=$containerReady): ${GREEN}OK${RESET}"
+    echo -en "  $containerName (ready=${RED}$containerReady${RESET}): "
   fi
 
-  local restartCount=$(jq -r ".restartCount // 0" <<<$containerStatus)
-  local stateRunning=$(jq -r '.state.running // empty' <<<$containerStatus)
+  local containerState=$(jq -r '.state' <<<$containerStatuses)
+  local containerStateIsRunning=$(jq_exists .running <<<$containerState)
+  local containerStateIsTerminated=$(jq_exists .terminated <<<$containerState)
+  local containerStateIsWaiting=$(jq_exists .waiting <<<$containerState)
 
-  if [ -n "$stateRunning" ]; then
-    local startedAt=$(jq -r '.startedAt' <<<$stateRunning)
-    local startedAtTimestamp=$(date -d "$startedAt" +%s --utc)
-    local nowTimestamp=$(date +%s --utc)
+  if $containerStateIsWaiting; then
+    local reason="$(jq -r '.waiting.reason // empty' <<<$containerState)"
+    local mesg="${YELLOW}Waiting (reason=$reason)"
+  elif $containerStateIsRunning; then
+    local mesg="${GREEN}Running"
+  elif $containerStateIsTerminated; then
+    local exitCode="$(jq -r '.terminated.exitCode // empty' <<<$containerState)"
+    local signal="$(jq -r '.terminated.signal // empty' <<<$containerState)"
+    local message="$(jq -r '.terminated.message // empty' <<<$containerState)"
+    local mesg="${GREEN}Terminated (exitCode=$exitCode${signal:+/signal=$signal}${message:+: $message})"
   fi
+
+  echo -en "${mesg}${RESET}"
+
+  local restartCount=$(jq -r ".restartCount // 0" <<<$containerStatuses)
+
+  if $containerStateIsWaiting; then
+    local state=$(jq -r '.waiting // empty' <<<$containerState)
+    echo ${RESET}
+    return
+  fi
+
+  if $containerStateIsRunning; then
+    local state=$(jq -r '.running // empty' <<<$containerState)
+  elif $containerStateIsTerminated; then
+    local state=$(jq -r '.terminated // empty' <<<$containerState)
+  fi
+
+  local startedAt=$(jq -r '.startedAt // 0' <<<$state)
+  local startedAtTimestamp=$(date -d "$startedAt" +%s --utc)
+  local nowTimestamp=$(date +%s --utc)
 
   if [ $restartCount -gt 0 ]; then
     echo -en " restarts=${RED}$restartCount${RESET}"
@@ -116,17 +154,19 @@ function check_container()
     #fi
   else
     echo -en " restarts=$restartCount"
-    echo -en " ${GREEN}OK${RESET}"
+    echo -en " ${GREEN}OK"
   fi
 
-  echo
+  echo -e "${RESET}"
 }
 
 for i in $(seq 0 $(($LEN - 1))); do
   pod=$(jq -r ".items[$i]" <<<$PODS)
   pod_name=$(jq -r ".metadata.name" <<<$pod)
+  pod_namespace=$(jq -r ".metadata.namespace" <<<$pod)
   node_name=$(jq -r ".spec.nodeName" <<<$pod)
-  echo -e "${BOLD}$node_name/$pod_name${RESET}"
+  phase=$(jq -r ".status.phase // empty" <<<$pod)
+  echo -e "${BOLD}$node_name $pod_namespace/$pod_name${RESET}"
   for i in $(seq 0 $(jq '(.spec.containers|length) - 1' <<<$pod)); do
     check_container "$pod" $i
   done | tabulate -f plain
