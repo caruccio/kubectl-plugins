@@ -20,37 +20,22 @@ color_map[Finished]="$gray"
 color_map[Completed]="$gray"
 color_map[NotReady]="$red"
 color_map[Ready]="$green"
+color_map[SchedulingDisabled]="$yellow"
 
 regex=""
 for word in ${!color_map[@]}; do
-  regex+="s/\b$word\b/${color_map[$word]}&$reset/g; t word; "
+  regex+="s|$word|${color_map[$word]}&$reset|g; "
 done
 
 regex+='
-
-:word
-s|\b0/0\b|0/0|; t ok
-s|\b1/1\b|1/1|; t ok
-s|\b2/2\b|2/2|; t ok
-s|\b3/3\b|3/3|; t ok
-s|\b4/4\b|4/4|; t ok
-s|\b5/5\b|5/5|; t ok
-s|\b6/6\b|6/6|; t ok
-s|\b7/7\b|7/7|; t ok
-s|\b8/8\b|8/8|; t ok
-s|\b9/9\b|9/9|; t ok
-b color
-
-:ok
-s|\b[0-9]\+/[0-9]\+\b|'$green'&'$reset'|g
-b done
-
-:color
-s|\b0/[1-9]\+[0-9]*\b|'$red'&'$reset'|g; t done
-s|\b[1-9]\+/[0-9]\+\b|'$yellow'&'$reset'|g; t done
-
-:done
+s|\b\([0-9]\+\)/\1\b|'$green'&'$reset'|g;
+s|\b0/[1-9]\+\b|'$red'&'$reset'|g;
+s|\b[1-9][1-9]*/[0-9]\+\b|'$yellow'&'$reset'|g;
 '
 
-#exec sed --debug -e "$regex"
-kubectl $@ | sed -e "$regex"
+if ${KC_DEBUG:-false}; then
+  echo "regex: $regex"
+  exec sed ${KC_TRACE:+--debug} -e "$regex"
+fi
+
+kubectl "$@" | sed -e "$regex"
