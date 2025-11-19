@@ -12,16 +12,16 @@ BEGIN {
     cert_cmd = "openssl x509 -text -noout"
     split("", certs) # create arrray
     c = 0 # cert index
-    cert_fp_cmd = "openssl x509 -fingerprint -noout -in <(echo -e '%s')"
-    cert_mod_cmd = "openssl x509 -modulus -noout -in <(echo -e '%s') | openssl md5"
+    cert_fp_cmd = "printf -- '%s' | openssl x509 -fingerprint -noout"
+    cert_mod_cmd = "printf -- '%s' | openssl x509 -modulus -noout | openssl md5"
 
     in_rsa_key = 0
     key_cmd["rsa"] = "openssl rsa -check -noout"
     split("", keys) # create array
     k = 0 # key index
-    keys_mod_cmd["rsa"] = "openssl rsa -modulus -noout -in <(echo -e '%s') | openssl md5"
+    keys_mod_cmd["rsa"] = "printf -- '%s' | openssl rsa -modulus -noout | openssl md5"
 
-    chain_cmd = "openssl verify -partial_chain -show_chain -CAfile <(echo -e '%s') <(echo -e '%s')"
+    chain_cmd = "bash -c \"openssl verify -partial_chain -show_chain -CAfile <(echo -e '%s') <(echo -e '%s')\""
 }
 
 /^-----BEGIN CERTIFICATE-----/ {
@@ -84,9 +84,9 @@ END {
         close(cmd)
 
         if (out ~ /OK$/) {
-            errors[i] = sprintf("SUCCESS: %s is signed by %s", fp_1, fp_2)
+            errors[i] = sprintf("\033[32;1mSUCCESS: %s is signed by %s\033[0m", fp_1, fp_2)
         } else {
-            errors[i]= sprintf("FAILED: %s not signed by %s", fp_1, fp_2)
+            errors[i]= sprintf("\033[31;1mFAILED: %s not signed by %s\033[0m", fp_1, fp_2)
             success = 0
             status = 1
         }
@@ -113,9 +113,9 @@ END {
         close(cmd)
 
         if (k_mod == c_mod) {
-            print "SUCCESS"
+            print "\033[32;1mSUCCESS\033[0m"
         } else {
-            print "FAILED"
+            print "\033[31;1mFAILED\033[0m"
         }
 
         print "Certificate modulus: " c_mod
